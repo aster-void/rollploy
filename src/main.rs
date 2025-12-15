@@ -12,7 +12,7 @@ use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "rollploy")]
-#[command(about = "Pull-based rolling-release deployment with zero-downtime blue-green strategy")]
+#[command(about = "Pull-based rolling deployment with zero-downtime blue-green strategy")]
 struct Cli {
     /// Git repository URL
     #[arg(long)]
@@ -26,13 +26,9 @@ struct Cli {
     #[arg(long, default_value = "docker-compose.yml")]
     compose: String,
 
-    /// Main service name in docker-compose.yml
+    /// Port to expose the app on
     #[arg(long)]
-    service: String,
-
-    /// Domain for Traefik routing (e.g., app.example.com)
-    #[arg(long)]
-    domain: String,
+    port: u16,
 
     /// Poll interval in seconds
     #[arg(long, default_value = "60")]
@@ -67,8 +63,7 @@ async fn main() -> anyhow::Result<()> {
         branch: cli.branch,
         local_path,
         compose_file: cli.compose,
-        service: cli.service,
-        domain: cli.domain,
+        port: cli.port,
         interval: Duration::from_secs(cli.interval),
         health_timeout: Duration::from_secs(cli.health_timeout),
     };

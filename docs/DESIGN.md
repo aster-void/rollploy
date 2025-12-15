@@ -1,56 +1,49 @@
 # Rollploy Design
 
-Pull-based rolling-release deployment with **zero-downtime blue-green strategy**.
+Pull-based rolling deployment with **zero-downtime blue-green strategy**.
 
 ## Architecture
 
+Each rollploy instance is fully isolated:
+
 ```
-                    ┌──────────────┐
-        :80/:443 ──►│   Traefik    │  (managed by rollploy)
-                    └──────┬───────┘
-                           │ Docker provider
-              ┌────────────┴────────────┐
-              │                         │
-       ┌──────▼──────┐          ┌───────▼─────┐
-       │  app-blue   │          │  app-green  │
-       │  (active)   │          │  (standby)  │
-       └─────────────┘          └─────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                        Server                           │
+│                                                         │
+│  rollploy #1                    rollploy #2             │
+│  ┌───────────────────┐         ┌───────────────────┐   │
+│  │ traefik :3001     │         │ traefik :3002     │   │
+│  │     ↓             │         │     ↓             │   │
+│  │ app1-blue/green   │         │ app2-blue/green   │   │
+│  │ network: app1     │         │ network: app2     │   │
+│  └───────────────────┘         └───────────────────┘   │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**1 instance = 1 repository** (run multiple instances for multiple repos)
+**1 rollploy = 1 Traefik = 1 app = 1 port**
+
+No shared resources. Complete isolation.
 
 ## Blue-Green Deployment Flow
 
-1. Determine inactive slot (if blue active → deploy to green)
-2. `docker compose -p {app}-{slot} up -d` with inactive labels
-3. Wait for Docker healthcheck to pass
-4. Redeploy with active Traefik labels (switches routing)
-5. Old slot stays running (instant rollback possible)
-
-## File Structure
-
 ```
-src/
-├── main.rs              # CLI parsing, actor bootstrap
-├── actors/
-│   ├── mod.rs
-│   └── deployer.rs      # Blue-green deployment logic
-├── docker.rs            # docker compose operations
-├── git.rs               # git clone/pull
-├── state.rs             # Slot enum, state persistence
-└── traefik.rs           # Traefik management
+State: app-blue running
+
+1. git pull → updates found
+2. docker compose -p app-green up
+3. wait for healthcheck
+4. docker compose -p app-blue down
+
+State: app-green running (ZDT achieved)
 ```
+
+During steps 2-4, both are running → Traefik routes to both → no downtime.
 
 ## CLI
 
 ```bash
-rollploy --repo https://github.com/user/app \
-         --branch main \
-         --compose docker-compose.yml \
-         --service web \
-         --domain app.example.com \
-         --interval 60 \
-         --health-timeout 120
+rollploy --repo https://github.com/user/app --port 3001
 ```
 
 ### Required Flags
@@ -58,8 +51,7 @@ rollploy --repo https://github.com/user/app \
 | Flag | Description |
 |------|-------------|
 | `--repo` | Git repository URL |
-| `--service` | Main service name in docker-compose.yml |
-| `--domain` | Domain for Traefik routing |
+| `--port` | Port to expose the app on |
 
 ### Optional Flags
 
@@ -71,32 +63,39 @@ rollploy --repo https://github.com/user/app \
 | `--health-timeout` | 120 | Health check timeout (seconds) |
 | `--dir` | auto | Local clone directory |
 
-## User Requirements
+## User's docker-compose.yml
 
-### docker-compose.yml
-
-Must define healthcheck and connect to rollploy network:
+Just a normal compose file with healthcheck:
 
 ```yaml
 services:
   web:
-    image: myapp:latest
+    build: .
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s
       timeout: 3s
       retries: 3
-    networks:
-      - rollploy
+```
 
-networks:
-  rollploy:
-    external: true
+No special labels needed. Rollploy handles everything.
+
+## File Structure
+
+```
+src/
+├── main.rs           # CLI
+├── actors/
+│   └── deployer.rs   # Blue-green logic
+├── docker.rs         # Docker compose operations
+├── git.rs            # Git operations
+├── state.rs          # Slot persistence
+└── traefik.rs        # Traefik management
 ```
 
 ## State Persistence
 
-Active slot is persisted to `{repo}/.rollploy-state.json`:
+Active slot persisted to `{repo}/.rollploy-state.json`:
 
 ```json
 {
@@ -104,10 +103,21 @@ Active slot is persisted to `{repo}/.rollploy-state.json`:
 }
 ```
 
-## Dependencies
+## Multiple Apps
 
-- `ractor` - Actor framework (Erlang-style)
-- `tokio` - Async runtime
-- `clap` - CLI parsing
-- `serde` - State serialization
-- `tracing` - Logging
+Run multiple instances on different ports:
+
+```bash
+rollploy --repo .../app1 --port 3001 &
+rollploy --repo .../app2 --port 3002 &
+rollploy --repo .../app3 --port 3003 &
+```
+
+Optional: Add nginx/Traefik in front for SSL and domain routing:
+
+```
+:443 → nginx (user-managed)
+         ├──► localhost:3001 (app1)
+         ├──► localhost:3002 (app2)
+         └──► localhost:3003 (app3)
+```

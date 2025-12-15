@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub fn compose_up(cwd: &Path, compose_files: &[&str], project: &str) -> Result<()> {
+pub fn compose_up(cwd: &Path, compose_files: &[&str], project: &str, network: &str) -> Result<()> {
     let mut args = vec!["compose", "-p", project];
     for f in compose_files {
         args.push("-f");
@@ -20,6 +20,10 @@ pub fn compose_up(cwd: &Path, compose_files: &[&str], project: &str) -> Result<(
     if !status.success() {
         bail!("docker compose up exited with {}", status);
     }
+
+    // Connect to network
+    connect_to_network(project, network)?;
+
     Ok(())
 }
 
@@ -43,70 +47,68 @@ pub fn compose_down(cwd: &Path, compose_files: &[&str], project: &str) -> Result
     Ok(())
 }
 
-pub fn wait_healthy(project: &str, service: &str, timeout: Duration) -> Result<()> {
-    let container = format!("{}-{}-1", project, service);
+fn connect_to_network(project: &str, network: &str) -> Result<()> {
+    // Get all containers in the project
+    let output = Command::new("docker")
+        .args(["compose", "-p", project, "ps", "-q"])
+        .output()
+        .context("docker compose ps failed")?;
+
+    let container_ids = String::from_utf8_lossy(&output.stdout);
+    for id in container_ids.lines() {
+        if id.is_empty() {
+            continue;
+        }
+        // Connect container to network (ignore if already connected)
+        let _ = Command::new("docker")
+            .args(["network", "connect", network, id])
+            .status();
+    }
+    Ok(())
+}
+
+pub fn wait_healthy(project: &str, timeout: Duration) -> Result<()> {
     let start = Instant::now();
 
     loop {
         if start.elapsed() > timeout {
-            bail!("health check timeout for {}", container);
+            bail!("health check timeout for project {}", project);
         }
 
+        // Get all containers in project with health status
         let output = Command::new("docker")
-            .args(["inspect", "--format", "{{.State.Health.Status}}", &container])
+            .args([
+                "compose",
+                "-p",
+                project,
+                "ps",
+                "--format",
+                "{{.Health}}",
+            ])
             .output()
-            .context("docker inspect failed")?;
+            .context("docker compose ps failed")?;
 
-        let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let statuses = String::from_utf8_lossy(&output.stdout);
+        let statuses: Vec<&str> = statuses.lines().filter(|s| !s.is_empty()).collect();
 
-        match status.as_str() {
-            "healthy" => return Ok(()),
-            "unhealthy" => bail!("container {} is unhealthy", container),
-            _ => std::thread::sleep(Duration::from_secs(2)),
+        if statuses.is_empty() {
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
         }
-    }
-}
 
-pub fn update_labels(project: &str, service: &str, domain: &str, enable: bool) -> Result<()> {
-    let container = format!("{}-{}-1", project, service);
+        let all_healthy = statuses.iter().all(|s| *s == "healthy" || s.is_empty());
+        let any_unhealthy = statuses.iter().any(|s| *s == "unhealthy");
 
-    let labels: Vec<String> = if enable {
-        vec![
-            format!("traefik.enable=true"),
-            format!("traefik.http.routers.{}.rule=Host(`{}`)", project, domain),
-            format!("traefik.http.routers.{}.entrypoints=web", project),
-        ]
-    } else {
-        vec!["traefik.enable=false".to_string()]
-    };
-
-    // Docker doesn't support updating labels on running containers
-    // We need to use docker compose with labels override
-    // For now, we'll recreate with new labels via environment
-    for label in labels {
-        let status = Command::new("docker")
-            .args(["container", "update", "--label", &label, &container])
-            .status();
-
-        // docker container update doesn't support --label, so we use a workaround
-        if status.is_err() {
-            // Labels are set at container creation, not runtime
-            // The actual label switching happens via compose override
-            break;
+        if any_unhealthy {
+            bail!("container in project {} is unhealthy", project);
         }
+
+        if all_healthy {
+            return Ok(());
+        }
+
+        std::thread::sleep(Duration::from_secs(2));
     }
-
-    Ok(())
-}
-
-pub fn get_container_id(project: &str, service: &str) -> Result<String> {
-    let container = format!("{}-{}-1", project, service);
-    let output = Command::new("docker")
-        .args(["inspect", "--format", "{{.Id}}", &container])
-        .output()
-        .context("docker inspect failed")?;
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub fn network_exists(name: &str) -> bool {
@@ -118,6 +120,10 @@ pub fn network_exists(name: &str) -> bool {
 }
 
 pub fn create_network(name: &str) -> Result<()> {
+    if network_exists(name) {
+        return Ok(());
+    }
+
     let status = Command::new("docker")
         .args(["network", "create", name])
         .status()
