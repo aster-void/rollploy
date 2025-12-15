@@ -1,6 +1,8 @@
 mod actors;
 mod docker;
 mod git;
+mod state;
+mod traefik;
 
 use actors::{Deployer, DeployerArgs};
 use clap::Parser;
@@ -10,7 +12,7 @@ use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "rollploy")]
-#[command(about = "Pull-based rolling-release deployment system")]
+#[command(about = "Pull-based rolling-release deployment with zero-downtime blue-green strategy")]
 struct Cli {
     /// Git repository URL
     #[arg(long)]
@@ -24,9 +26,21 @@ struct Cli {
     #[arg(long, default_value = "docker-compose.yml")]
     compose: String,
 
+    /// Main service name in docker-compose.yml
+    #[arg(long)]
+    service: String,
+
+    /// Domain for Traefik routing (e.g., app.example.com)
+    #[arg(long)]
+    domain: String,
+
     /// Poll interval in seconds
     #[arg(long, default_value = "60")]
     interval: u64,
+
+    /// Health check timeout in seconds
+    #[arg(long, default_value = "120")]
+    health_timeout: u64,
 
     /// Local directory to clone repo into
     #[arg(long)]
@@ -53,7 +67,10 @@ async fn main() -> anyhow::Result<()> {
         branch: cli.branch,
         local_path,
         compose_file: cli.compose,
+        service: cli.service,
+        domain: cli.domain,
         interval: Duration::from_secs(cli.interval),
+        health_timeout: Duration::from_secs(cli.health_timeout),
     };
 
     let (_actor, handle) = Actor::spawn(Some("deployer".to_string()), Deployer, args).await?;
