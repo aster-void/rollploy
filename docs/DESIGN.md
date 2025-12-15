@@ -1,16 +1,27 @@
 # Rollploy Design
 
-Pull-based rolling deployment with **zero-downtime blue-green strategy**.
+Pull-based deployment and cron runner.
+
+## Commands
+
+- `rollploy deploy` - Blue-green deployment for docker-compose apps
+- `rollploy cron` - Auto-updating cron job runner
+
+---
+
+# Deploy
+
+Zero-downtime blue-green deployment.
 
 ## Architecture
 
-Each rollploy instance is fully isolated:
+Each rollploy deploy instance is fully isolated:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                        Server                           │
 │                                                         │
-│  rollploy #1                    rollploy #2             │
+│  rollploy deploy #1             rollploy deploy #2      │
 │  ┌───────────────────┐         ┌───────────────────┐   │
 │  │ traefik :3001     │         │ traefik :3002     │   │
 │  │     ↓             │         │     ↓             │   │
@@ -21,51 +32,26 @@ Each rollploy instance is fully isolated:
 └─────────────────────────────────────────────────────────┘
 ```
 
-**1 rollploy = 1 Traefik = 1 app = 1 port**
-
-No shared resources. Complete isolation.
-
-## Blue-Green Deployment Flow
-
-```
-State: app-blue running
-
-1. git pull → updates found
-2. docker compose -p app-green up
-3. wait for healthcheck
-4. docker compose -p app-blue down
-
-State: app-green running (ZDT achieved)
-```
-
-During steps 2-4, both are running → Traefik routes to both → no downtime.
+**1 deploy = 1 Traefik = 1 app = 1 port**
 
 ## CLI
 
 ```bash
-rollploy --repo https://github.com/user/app --port 3001
+rollploy deploy --repo https://github.com/user/app --port 3001
 ```
 
-### Required Flags
+### Flags
 
-| Flag | Description |
-|------|-------------|
-| `--repo` | Git repository URL |
-| `--port` | Port to expose the app on |
-
-### Optional Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--branch` | main | Branch to track |
-| `--compose` | docker-compose.yml | Compose file path |
-| `--interval` | 60 | Poll interval (seconds) |
-| `--health-timeout` | 120 | Health check timeout (seconds) |
-| `--dir` | auto | Local clone directory |
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--repo` | yes | - | Git repository URL |
+| `--port` | yes | - | Port to expose |
+| `--branch` | no | main | Branch to track |
+| `--compose` | no | docker-compose.yml | Compose file |
+| `--interval` | no | 60 | Poll interval (sec) |
+| `--health-timeout` | no | 120 | Health timeout (sec) |
 
 ## User's docker-compose.yml
-
-Just a normal compose file with healthcheck:
 
 ```yaml
 services:
@@ -78,46 +64,62 @@ services:
       retries: 3
 ```
 
-No special labels needed. Rollploy handles everything.
+---
 
-## File Structure
+# Cron
+
+Auto-updating cron job runner. Runs scripts on host.
+
+## CLI
+
+```bash
+rollploy cron --repo https://github.com/user/scripts
+```
+
+### Flags
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--repo` | yes | - | Git repository URL |
+| `--branch` | no | main | Branch to track |
+| `--interval` | no | 60 | Git pull interval (sec) |
+
+## Config File
+
+Create `rollploy.cron.yml` in repo root:
+
+```yaml
+jobs:
+  - name: backup
+    script: ./scripts/backup.sh
+    schedule: "0 0 * * *"    # daily at midnight
+
+  - name: cleanup
+    script: ./scripts/cleanup.sh
+    schedule: "0 */6 * * *"  # every 6 hours
+```
+
+## Behavior
+
+- Scripts run on host (not in container)
+- If a job is still running when next scheduled, it's skipped
+- Config reloads automatically on git pull
+- Output goes to stdout
+
+---
+
+# File Structure
 
 ```
 src/
-├── main.rs           # CLI
+├── main.rs
 ├── actors/
-│   └── deployer.rs   # Blue-green logic
-├── docker.rs         # Docker compose operations
-├── git.rs            # Git operations
-├── state.rs          # Slot persistence
-└── traefik.rs        # Traefik management
-```
-
-## State Persistence
-
-Active slot persisted to `{repo}/.rollploy-state.json`:
-
-```json
-{
-  "active_slot": "blue"
-}
-```
-
-## Multiple Apps
-
-Run multiple instances on different ports:
-
-```bash
-rollploy --repo .../app1 --port 3001 &
-rollploy --repo .../app2 --port 3002 &
-rollploy --repo .../app3 --port 3003 &
-```
-
-Optional: Add nginx/Traefik in front for SSL and domain routing:
-
-```
-:443 → nginx (user-managed)
-         ├──► localhost:3001 (app1)
-         ├──► localhost:3002 (app2)
-         └──► localhost:3003 (app3)
+│   └── deployer.rs    # Deploy actor
+├── cron/
+│   ├── config.rs      # Config parsing
+│   └── runner.rs      # Cron actor
+├── docker.rs
+├── git.rs
+├── state.rs
+└── traefik.rs
 ```
